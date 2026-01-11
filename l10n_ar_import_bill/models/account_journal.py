@@ -47,10 +47,16 @@ class AccountJournal(models.Model):
                 vat_column = "Nro. Doc. Receptor"
                 type_column = "Tipo Doc. Receptor"
                 name_column = "Denominación Receptor"
-            else:
+            elif self.type == "purchase":
                 vat_column = "Nro. Doc. Emisor"
                 type_column = "Tipo Doc. Emisor"
                 name_column = "Denominación Emisor"
+            else:
+                raise UserError(
+                    _(
+                        "Se subió un archivo que no se corresponde ni con ventas ni con compras para importar facturas desde AFIP."
+                    )
+                )
 
             # Optimización: Convertir VAT a string de una vez
             df[vat_column] = df[vat_column].astype(int).astype(str)
@@ -159,11 +165,7 @@ class AccountJournal(models.Model):
                 "Importación de Facturas de Cliente" if self.type == "sale" else "Importación de Facturas de Proveedor"
             )
 
-            return {
-                "name": wizard_name,
-                "type": "ir.actions.act_window",
-                "res_model": "afip.import.wizard",
-                "target": "new",
-                "views": [[self.env.ref("l10n_ar_import_bill.view_afip_import_wizard_form").id, "form"]],
-                "res_id": wizard.id,
-            }
+            return wizard._get_records_action(
+                name=wizard_name,
+                target="new",
+            )
