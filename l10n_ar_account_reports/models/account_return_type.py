@@ -28,6 +28,9 @@ class AccountReturnType(models.Model):
     default_deadline_periodicity = fields.Selection(
         selection_add=L10N_AR_PERIODS,
     )
+    # le ponemos store porque en odoo es un campo solo related y si no hay cuenta bancaria no hay partner
+    # issue en odoo: https://github.com/odoo/odoo/issues/240322
+    payment_partner_id = fields.Many2one(store=True)
 
     def _get_periodicity_months_delay(self, company):
         """Returns the number of months separating two returns.
@@ -147,74 +150,172 @@ class AccountReturnType(models.Model):
 
         return super()._get_period_name(main_company, period_from, period_to, minimal, lang_code)
 
+    def _get_l10n_ar_activity_domain(self):
+        """Returns the domain to detect activity for this return type.
+        This domain is used both for automatic return generation and for the closing entry.
+        """
+        self.ensure_one()
+        external_id = self.get_external_id().get(self.id)
+        if external_id == "l10n_ar_account_reports.ar_caba_iibb_return_type":
+            return [
+                ("tax_line_id.l10n_ar_state_id.code", "=", "C"),
+                ("tax_line_id.l10n_ar_state_id.country_id.code", "=", "AR"),
+                "|",
+                ("tax_line_id.type_tax_use", "=", "sale"),
+                ("tax_line_id.l10n_ar_withholding_payment_type", "=", "supplier"),
+            ]
+        if external_id == "l10n_ar_account_reports.ar_pba_iibb_return_type":
+            return [
+                ("tax_line_id.l10n_ar_state_id.code", "=", "B"),
+                ("tax_line_id.l10n_ar_state_id.country_id.code", "=", "AR"),
+                "|",
+                ("tax_line_id.type_tax_use", "=", "sale"),
+                ("tax_line_id.l10n_ar_withholding_payment_type", "=", "supplier"),
+            ]
+        if external_id == "l10n_ar_account_reports.ar_mendoza_iibb_return_type":
+            return [
+                ("tax_line_id.l10n_ar_state_id.code", "=", "M"),
+                ("tax_line_id.l10n_ar_state_id.country_id.code", "=", "AR"),
+                ("tax_line_id.l10n_ar_withholding_payment_type", "=", "supplier"),
+            ]
+        if external_id == "l10n_ar_account_reports.ar_misiones_iibb_return_type":
+            return [
+                ("tax_line_id.l10n_ar_state_id.code", "=", "N"),
+                ("tax_line_id.l10n_ar_state_id.country_id.code", "=", "AR"),
+                "|",
+                ("tax_line_id.type_tax_use", "=", "sale"),
+                ("tax_line_id.l10n_ar_withholding_payment_type", "=", "supplier"),
+            ]
+        if external_id == "l10n_ar_account_reports.ar_santa_fe_iibb_return_type":
+            return [
+                ("tax_line_id.l10n_ar_state_id.code", "=", "S"),
+                ("tax_line_id.l10n_ar_state_id.country_id.code", "=", "AR"),
+                "|",
+                ("tax_line_id.type_tax_use", "=", "sale"),
+                ("tax_line_id.l10n_ar_withholding_payment_type", "=", "supplier"),
+            ]
+        if external_id == "l10n_ar_account_reports.ar_sifere_iibb_return_type":
+            return [
+                ("tax_line_id.l10n_ar_state_id", "!=", False),
+                ("tax_line_id.l10n_ar_state_id.country_id.code", "=", "AR"),
+                "|",
+                ("tax_line_id.type_tax_use", "=", "purchase"),
+                ("tax_line_id.l10n_ar_withholding_payment_type", "=", "customer"),
+            ]
+        if external_id == "l10n_ar_account_reports.ar_sircar_iibb_return_type":
+            return [
+                ("tax_line_id.l10n_ar_state_id.code", "not in", ["C", "B", "T"]),
+                ("tax_line_id.l10n_ar_state_id.country_id.code", "=", "AR"),
+                "|",
+                ("tax_line_id.type_tax_use", "=", "sale"),
+                ("tax_line_id.l10n_ar_withholding_payment_type", "=", "supplier"),
+            ]
+        if external_id == "l10n_ar_account_reports.ar_tucuman_iibb_return_type":
+            return [
+                ("tax_line_id.l10n_ar_state_id.code", "=", "T"),
+                ("tax_line_id.l10n_ar_state_id.country_id.code", "=", "AR"),
+                "|",
+                ("tax_line_id.type_tax_use", "=", "sale"),
+                ("tax_line_id.l10n_ar_withholding_payment_type", "=", "supplier"),
+            ]
+        if external_id == "l10n_ar_reports.ar_tax_return_type":
+            return [
+                "|",
+                # GRUPO A: Impuestos con código de IVA AFIP (Ventas o Compras)
+                "&",
+                ("tax_line_id.tax_group_id.l10n_ar_vat_afip_code", "!=", False),
+                ("tax_line_id.type_tax_use", "in", ["sale", "purchase"]),
+                # GRUPO B: Retenciones / Percepciones sufridas
+                "&",
+                "&",
+                ("tax_line_id.l10n_ar_state_id", "=", False),
+                ("tax_line_id.tax_group_id.l10n_ar_tribute_afip_code", "=", "06"),
+                "|",
+                ("tax_line_id.l10n_ar_withholding_payment_type", "=", "customer"),
+                ("tax_line_id.type_tax_use", "=", "purchase"),
+            ]
+        if external_id == "l10n_ar_account_reports.sicore_return_type":
+            return [
+                ("tax_line_id.l10n_ar_tax_type", "in", ["earnings", "earnings_scale"]),
+                ("tax_line_id.l10n_ar_withholding_payment_type", "=", "supplier"),
+                ("tax_line_id.country_code", "=", "AR"),
+            ]
+        return []
+
+    def _can_return_exist(self, company, tax_unit=False):
+        """Extensión para no generar el tax return de IVA (ar_tax_return_type)
+        en empresas Monotributistas o Exentas que no tienen obligación de IVA.
+        """
+        res = super()._can_return_exist(company, tax_unit)
+        if not res:
+            return False
+
+        # Solo aplicamos la restricción al tax return de IVA nativo de Argentina
+        ar_tax_return_type = self.env.ref("l10n_ar_reports.ar_tax_return_type", raise_if_not_found=False)
+        if company.country_id.code == "AR" and self == ar_tax_return_type:
+            # Monotributista (code=6) y Exento (code=4) no tienen obligación de IVA
+            if company.l10n_ar_afip_responsibility_type_id.code in ("4", "6"):
+                return False
+
+        return res
+
     @api.model
     def _generate_all_returns(self, country_code, main_company, tax_unit=None):
         """
         Generate all periodic returns for Argentina (AR).
-        Many returns are only created if there is activity (move lines with specific tags/taxes)
-        in the period, to avoid cluttering the UI with empty returns.
+
+        Approach: Once we detect that a company has used a specific tax (e.g., IIBB perceptions
+        for Santa Fe), we generate ALL returns for the fiscal year. This makes sense because:
+        1. If you're a withholding/perception agent, you typically are for the whole year
+        2. Users can see all their fiscal obligations upfront
+        3. Even if a period has zero activity, they may need to file a zero declaration
+
+        We search for activity in the current and previous fiscal year to ensure we catch
+        all relevant periods, especially around year boundaries.
         """
         super()._generate_all_returns(country_code, main_company, tax_unit=tax_unit)
 
         if country_code != "AR":
             return
 
-        # Mapping of return types to their activity detection domains
-        # We use the same logic as the report lines to detect if there is activity
-        return_type_domains = {
-            "l10n_ar_account_reports.ar_pba_iibb_return_type": [
-                ("tax_line_id.l10n_ar_state_id.code", "=", "B"),
-                ("tax_line_id.l10n_ar_state_id.country_id.code", "=", "AR"),
-            ],
-            "l10n_ar_account_reports.ar_caba_iibb_return_type": [
-                ("tax_line_id.l10n_ar_state_id.code", "=", "C"),
-                ("tax_line_id.l10n_ar_state_id.country_id.code", "=", "AR"),
-            ],
-            "l10n_ar_account_reports.ar_mendoza_iibb_return_type": [
-                ("tax_line_id.l10n_ar_state_id.code", "=", "M"),
-                ("tax_line_id.l10n_ar_state_id.country_id.code", "=", "AR"),
-            ],
-            "l10n_ar_account_reports.ar_misiones_iibb_return_type": [
-                ("tax_line_id.l10n_ar_state_id.code", "=", "N"),
-                ("tax_line_id.l10n_ar_state_id.country_id.code", "=", "AR"),
-            ],
-            "l10n_ar_account_reports.ar_santa_fe_iibb_return_type": [
-                ("tax_line_id.l10n_ar_state_id.code", "=", "S"),
-                ("tax_line_id.l10n_ar_state_id.country_id.code", "=", "AR"),
-            ],
-            "l10n_ar_account_reports.ar_tucuman_iibb_return_type": [
-                ("tax_line_id.l10n_ar_state_id.code", "=", "T"),
-                ("tax_line_id.l10n_ar_state_id.country_id.code", "=", "AR"),
-            ],
-            "l10n_ar_account_reports.sicore_return_type": [
-                ("tax_line_id.l10n_ar_tax_type", "in", ["earnings", "earnings_scale"]),
-                ("tax_line_id.country_code", "=", "AR"),
-            ],
-            "l10n_ar_account_reports.ar_sifere_iibb_return_type": [
-                ("tax_line_id.l10n_ar_state_id", "!=", False),
-                ("tax_line_id.l10n_ar_state_id.country_id.code", "=", "AR"),
-            ],
-            "l10n_ar_account_reports.ar_sircar_iibb_return_type": [
-                ("tax_line_id.l10n_ar_state_id.code", "not in", ["C", "B", "T"]),
-                ("tax_line_id.l10n_ar_state_id.country_id.code", "=", "AR"),
-            ],
-        }
-
         today = fields.Date.context_today(self)
-        fy_dates = main_company.compute_fiscalyear_dates(today)
-        start_fy = fy_dates["date_from"]
-        end_fy = fy_dates["date_to"]
 
-        for xml_id, domain in return_type_domains.items():
+        # Calculamos el rango de búsqueda: año fiscal actual + anterior
+        # Esto garantiza que encontremos actividad incluso en cambios de año
+        current_fy = main_company.compute_fiscalyear_dates(today)
+        previous_fy = main_company.compute_fiscalyear_dates(current_fy["date_from"] - relativedelta(days=1))
+
+        search_date_from = previous_fy["date_from"]
+        search_date_to = current_fy["date_to"]
+
+        ar_return_xml_ids = [
+            "l10n_ar_account_reports.ar_pba_iibb_return_type",
+            "l10n_ar_account_reports.ar_caba_iibb_return_type",
+            "l10n_ar_account_reports.ar_mendoza_iibb_return_type",
+            "l10n_ar_account_reports.ar_misiones_iibb_return_type",
+            "l10n_ar_account_reports.ar_santa_fe_iibb_return_type",
+            "l10n_ar_account_reports.ar_tucuman_iibb_return_type",
+            "l10n_ar_account_reports.sicore_return_type",
+            "l10n_ar_account_reports.ar_sifere_iibb_return_type",
+            "l10n_ar_account_reports.ar_sircar_iibb_return_type",
+            # Nota: ar_tax_return_type (IVA) NO está en esta lista porque tiene auto_generate=True
+            # y ya se genera automáticamente en super()._generate_all_returns()
+        ]
+
+        for xml_id in ar_return_xml_ids:
             return_type = self.env.ref(xml_id, raise_if_not_found=False)
             if not return_type:
+                continue
+
+            domain = return_type._get_l10n_ar_activity_domain()
+            if not domain:
                 continue
 
             company_ids = (
                 self.env["account.return"].sudo()._get_company_ids(main_company, tax_unit, return_type.report_id)
             )
 
-            # Check if there is activity in the current fiscal year
+            # Buscamos actividad en el rango amplio (año fiscal anterior + actual)
             has_activity = (
                 self.env["account.move.line"]
                 .sudo()
@@ -222,8 +323,8 @@ class AccountReturnType(models.Model):
                     [
                         *domain,
                         ("company_id", "in", company_ids.ids),
-                        ("date", ">=", start_fy),
-                        ("date", "<=", end_fy),
+                        ("date", ">=", search_date_from),
+                        ("date", "<=", search_date_to),
                         ("parent_state", "=", "posted"),
                     ],
                     limit=1,
@@ -231,4 +332,7 @@ class AccountReturnType(models.Model):
             )
 
             if has_activity:
-                return_type._try_create_returns_for_fiscal_year(main_company, tax_unit)
+                # Generamos returns para todo el rango donde hay actividad
+                # bypass_period_check=True permite crear returns incluso para períodos
+                # cuyo deadline ya pasó (importante para el año fiscal anterior)
+                return_type._try_create_returns_for_fiscal_year(main_company, tax_unit, bypass_period_check=True)
