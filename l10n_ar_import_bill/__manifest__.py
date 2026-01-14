@@ -1,6 +1,6 @@
 {
     "name": "Argentinian Importing Bills from ARCA",
-    "version": "19.0.1.1.0",
+    "version": "19.0.1.2.0",
     "category": "Localization/Argentina",
     "sequence": 8,
     "author": "ADHOC SA",
@@ -11,8 +11,13 @@
     "data": [
         "security/ir.model.access.csv",
         "wizards/afip_import_wizard.xml",
-        "views/res_config_settings_views.xml",
     ],
+    "assets": {
+        "web.assets_backend": [
+            "l10n_ar_import_bill/static/src/js/**/*",
+            "l10n_ar_import_bill/static/src/xml/**/*",
+        ],
+    },
     "installable": True,
     "auto_install": False,
     "application": False,
