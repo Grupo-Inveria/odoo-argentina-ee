@@ -1,4 +1,4 @@
-from odoo import Command, _, fields, models
+from odoo import Command, _, api, fields, models
 from odoo.exceptions import UserError
 
 
@@ -34,12 +34,6 @@ class AccountReturn(models.Model):
             domain += l10n_ar_domain
         return domain
 
-    def _is_ar_simple_closing_return(self):
-        """Check if this return should use simple closing (no carryover, no tax_lock_date)."""
-        return self.company_id.country_id.code == "AR" and self.type_id != self.env.ref(
-            "l10n_ar_reports.ar_tax_return_type"
-        )
-
     def _ensure_tax_group_configuration_for_tax_closing(self):
         """
         Skip tax group account validation for AR simple closing returns,
@@ -47,24 +41,47 @@ class AccountReturn(models.Model):
         NOTA: esto de acá no suma tanto porque si se quiere liquidar el informde "vat" u otro igual se van a chequear
         todas las cuentas
         """
-        if self._is_ar_simple_closing_return():
+        if self.type_id.l10n_ar_is_simple_closing_return:
             return
         return super()._ensure_tax_group_configuration_for_tax_closing()
 
-    def _get_tax_closing_payable_and_receivable_accounts(self):
-        """Eso es necesario para que los importes total_amount_to_pay y period_amount_to_pay se calcule bien"""
-        if self._is_ar_simple_closing_return():
-            partner = self.type_id.payment_partner_id
-            return partner.with_company(self.company_id).property_account_payable_id, partner.with_company(
-                self.company_id
-            ).property_account_receivable_id
-        return super()._get_tax_closing_payable_and_receivable_accounts()
+    # ver en _compute_show_amount_to_pay
+    # def _get_tax_closing_payable_and_receivable_accounts(self):
+    #     """Eso es necesario para que los importes total_amount_to_pay y period_amount_to_pay se calcule bien"""
+    #     if self._is_ar_simple_closing_return():
+    #         partner = self.type_id.payment_partner_id
+    #         return partner.with_company(self.company_id).property_account_payable_id, partner.with_company(
+    #             self.company_id
+    #         ).property_account_receivable_id
+    #     return super()._get_tax_closing_payable_and_receivable_accounts()
+
+    @api.depends(
+        "type_id.l10n_ar_is_simple_closing_return",
+    )
+    def _compute_show_amount_to_pay(self):
+        """
+        Para liquidaciones simples de Argentina, los importes calculados por Odoo al bloquear el informe
+        pueden no ser representativos si el asiento fue modificado manualmente o si no se utiliza
+        la configuración estándar de grupos de impuestos. Ocultamos el bloque si los importes son cero
+        para evitar mostrar información irrelevante o confusa.
+        TODO mas adelante podriamos:
+        a) borrar el partche en "_proceed_with_locking"
+        b) dejar que los montos se muestren para los asientos que se publicana automáticamente y/o mejorar para que
+        cambiar asiento manualmente actualice los montos
+        c) agregar en condición de abajo "and not record.total_amount_to_pay and not record.period_amount_to_pay"
+
+        Por ahora vamos por lo simple
+        """
+        super()._compute_show_amount_to_pay()
+        for record in self:
+            if record.type_id.l10n_ar_is_simple_closing_return:
+                record.show_amount_to_pay = False
 
     def _on_post_submission_event(self):
         """No queremos que luego de submit dispare directamente pago, prefiero que se haga click en en boton,
         mas adelante se puede implementar un wizard de submit o similar como hacen otros heredando método action_submit
         """
-        if self._is_ar_simple_closing_return():
+        if self.type_id.l10n_ar_is_simple_closing_return:
             if self.type_id.states_workflow == "generic_state_review_submit":
                 return self._mark_completed()
             return
@@ -76,7 +93,7 @@ class AccountReturn(models.Model):
         For AR simple closing returns, create a simple counterpart line using the partner's AP/AR account.
         This avoids the carryover mechanism (no "Balance tax current account" lines).
         """
-        if not self._is_ar_simple_closing_return():
+        if not self.type_id.l10n_ar_is_simple_closing_return:
             return super()._add_tax_group_closing_items(tax_group_subtotal)
 
         # Sum all tax group subtotals to get the total amount
@@ -96,15 +113,21 @@ class AccountReturn(models.Model):
                 )
             )
 
-        # Use partner's payable account for amounts to pay, receivable for credits
-        if total < 0:
-            # Amount to pay (negative balance means we owe taxes)
-            account = partner.with_company(self.company_id).property_account_payable_id
-            line_name = _("Tax to pay")
+        # Check if a specific account is configured on the return type
+        configured_account = self.type_id.l10n_ar_account_id
+
+        line_name = _("Tax to pay") if total < 0 else _("Tax credit")
+        if configured_account:
+            # Use the configured account from the return type
+            account = configured_account
         else:
-            # Credit in favor (positive balance means tax credit)
-            account = partner.with_company(self.company_id).property_account_receivable_id
-            line_name = _("Tax credit")
+            # Fallback: Use partner's payable account for amounts to pay, receivable for credits
+            if total < 0:
+                # Amount to pay (negative balance means we owe taxes)
+                account = partner.with_company(self.company_id).property_account_payable_id
+            else:
+                # Credit in favor (positive balance means tax credit)
+                account = partner.with_company(self.company_id).property_account_receivable_id
 
         if not account:
             raise UserError(
@@ -144,7 +167,10 @@ class AccountReturn(models.Model):
 
         # por ahora no queremos ningun informe argentino que haga lock porque, IVA, que es el principal lo estamos
         # dejando editable para que el usuario termine de acomodarlo, luego deberá hacer lock manualmente
-        if self._is_ar_simple_closing_return():
+        if self.type_id.l10n_ar_is_simple_closing_return:
+            # ver notas en _compute_show_amount_to_pay
+            self.write({"total_amount_to_pay": False, "period_amount_to_pay": False})
+
             # Restore tax_lock_date to prevent it from being modified by provincial returns
             for company, original_date in tax_lock_dates.items():
                 if company.tax_lock_date != original_date:
@@ -152,11 +178,6 @@ class AccountReturn(models.Model):
 
         # si no posteamos devolvemos acción
         if self.closing_move_ids.filtered(lambda m: m.state == "draft"):
-            # para el libro de IVA asignamos también el partner si está definido
-            if self.type_id == self.env.ref("l10n_ar_reports.ar_tax_return_type") and self.type_id.payment_partner_id:
-                self.closing_move_ids.line_ids.filtered(
-                    lambda l: l.account_id.account_type in ("asset_receivable", "liability_payable")
-                ).partner_id = self.type_id.payment_partner_id.id
             return self.closing_move_ids._get_records_action()
         return res
 
@@ -179,12 +200,16 @@ class AccountReturn(models.Model):
     def _get_pay_wizard(self):
         # EXTENDS account_reports
         if self.company_id.country_id.code == "AR" and self.is_tax_return and self.type_id.payment_partner_id:
-            line_to_pay = self.closing_move_ids.line_ids.filtered(
+            lines_to_pay = self.closing_move_ids.line_ids.filtered(
                 lambda l: l.partner_id == self.type_id.payment_partner_id
                 and l.account_id.account_type in ("asset_receivable", "liability_payable")
             )
-            if line_to_pay:
-                return line_to_pay.action_register_payment()
+            # si el saldo es a favor (balance >= 0), actualizamos estado y no abrimos wizard
+            if lines_to_pay and sum(lines_to_pay.mapped("balance")) >= 0:
+                self._update_payment_state()
+                return
+            if lines_to_pay:
+                return lines_to_pay.action_register_payment()
         return super()._get_pay_wizard()
 
     def _update_payment_state(self):
@@ -196,7 +221,8 @@ class AccountReturn(models.Model):
                     and l.account_id.account_type in ("asset_receivable", "liability_payable")
                 )
                 if lines_to_pay:
-                    is_paid = all(lines_to_pay.mapped("reconciled"))
+                    # Si el saldo es "a favor" (balance >= 0) o está conciliado, lo pasamos a pagado
+                    is_paid = sum(lines_to_pay.mapped("balance")) >= 0 or all(lines_to_pay.mapped("reconciled"))
                     workflow_field = record.type_id.states_workflow
                     if is_paid and record.state != "paid":
                         record.state = "paid"

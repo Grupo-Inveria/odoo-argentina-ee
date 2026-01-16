@@ -30,7 +30,33 @@ class AccountReturnType(models.Model):
     )
     # le ponemos store porque en odoo es un campo solo related y si no hay cuenta bancaria no hay partner
     # issue en odoo: https://github.com/odoo/odoo/issues/240322
-    payment_partner_id = fields.Many2one(store=True)
+    # al final le sacamos también el related porque si no en el create no se guarda. Podria implementarse como compute
+    # pero no vemos necesidad por el momento
+    payment_partner_id = fields.Many2one(store=True, related=False)
+
+    l10n_ar_account_id = fields.Many2one(
+        comodel_name="account.account",
+        string="AR Closing Account",
+        company_dependent=True,
+        domain="[('account_type', 'in', ('liability_payable', 'asset_receivable'))]",
+        help="Account to use for the closing entry of this return type. "
+        "If not set, the partner's payable/receivable account will be used.",
+    )
+    l10n_ar_is_simple_closing_return = fields.Boolean(
+        string="AR Simple Closing",
+        compute="_compute_l10n_ar_is_simple_closing_return",
+        help="If enabled, this return type uses simplified closing logic: "
+        "no carryover mechanism and no automatic tax_lock_date update.",
+    )
+
+    @api.depends("country_id")
+    def _compute_l10n_ar_is_simple_closing_return(self):
+        """Compute if this return type should use simple closing (no carryover, no tax_lock_date).
+        Al libro de IVA también lo hacemos tipo 'simple' porque los carryover confunden,
+        mezclan libre disponibilidad y saldo a favor, además crean líneas de neto que confunden.
+        """
+        for record in self:
+            record.l10n_ar_is_simple_closing_return = record.country_id.code == "AR"
 
     def _get_periodicity_months_delay(self, company):
         """Returns the number of months separating two returns.
@@ -305,6 +331,37 @@ class AccountReturnType(models.Model):
         for xml_id in ar_return_xml_ids:
             return_type = self.env.ref(xml_id, raise_if_not_found=False)
             if not return_type:
+                continue
+
+            if not return_type._can_return_exist(main_company, tax_unit):
+                continue
+
+            gi_type = main_company.l10n_ar_gross_income_type
+
+            # Lógica de selección de reportes de IIBB según régimen
+            # SIFERE y SIRCAR solo si es multilateral
+            if (
+                xml_id
+                in [
+                    "l10n_ar_account_reports.ar_sircar_iibb_return_type",
+                    "l10n_ar_account_reports.ar_sifere_iibb_return_type",
+                ]
+                and gi_type != "multilateral"
+            ):
+                continue
+
+            # Mendoza, Misiones y Santa Fe NO van si es multilateral (usan SIRCAR)
+            sircar_provinces = [
+                "l10n_ar_account_reports.ar_mendoza_iibb_return_type",
+                "l10n_ar_account_reports.ar_misiones_iibb_return_type",
+                "l10n_ar_account_reports.ar_santa_fe_iibb_return_type",
+            ]
+            if gi_type == "multilateral" and xml_id in sircar_provinces:
+                continue
+
+            # Caso SIFERE: se genera siempre que sea multilateral, incluso sin operaciones
+            if xml_id == "l10n_ar_account_reports.ar_sifere_iibb_return_type":
+                return_type._try_create_returns_for_fiscal_year(main_company, tax_unit, bypass_period_check=True)
                 continue
 
             domain = return_type._get_l10n_ar_activity_domain()
