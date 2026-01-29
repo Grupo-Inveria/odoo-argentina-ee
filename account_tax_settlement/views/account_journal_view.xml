@@ -1,0 +1,94 @@
+<?xml version="1.0" encoding="utf-8"?>
+<odoo>
+    <!--
+    ODOO 19 MIGRATION NOTE:
+    The kanban dashboard view inheritance has been temporarily disabled due to
+    structural changes in account.account_journal_dashboard_kanban_view.
+    The field 'json_activity_data' no longer exists in the parent view.
+
+    To re-enable:
+    1. Inspect the Odoo 19 kanban dashboard view structure
+    2. Find appropriate anchor element for tax settlement display
+    3. Update xpath accordingly and uncomment the record below
+    -->
+
+    <record id="view_account_journal_form" model="ir.ui.view">
+        <field name="model">account.journal</field>
+        <field name="name">account.journal.form</field>
+        <field name="inherit_id" ref="account.view_account_journal_form"/>
+        <field name="arch" type="xml">
+            <field name="type" position="after">
+                <field name="tax_settlement" invisible="type != 'general'"/>
+                <!-- <field name="settlement_file_template" attrs="{'invisible': [('tax_settlement', '=', False)]}"/> -->
+                <field name="settlement_tax" invisible="not tax_settlement"/>
+                <field name="settlement_partner_id" invisible="not tax_settlement" required="tax_settlement"/>
+                <field name="settlement_account_id" invisible="type != 'general' or not tax_settlement" required="type == 'general' and tax_settlement" groups="account.group_account_readonly"/>
+                <field name="settlement_account_tag_ids" invisible="not tax_settlement" widget="many2many_tags"/>
+            </field>
+        </field>
+    </record>
+
+    <!-- Odoo 19: Vista restaurada con xpaths actualizados -->
+    <record id="account_journal_dashboard_kanban_view_inherited" model="ir.ui.view">
+        <field name="name">account.journal.dashboard.kanban.inherited</field>
+        <field name="model">account.journal</field>
+        <field name="inherit_id" ref="account.account_journal_dashboard_kanban_view" />
+        <field name="arch" type="xml">
+
+            <!-- Agregar campo tax_settlement para usarlo en condiciones -->
+            <field name="kanban_dashboard" position="after">
+                <field name="tax_settlement"/>
+            </field>
+
+            <!-- Insertar los botones dentro del template JournalMiscelaneous, después del div de la derecha -->
+            <xpath expr="//t[@t-name='JournalMiscelaneous']/div[@id='dashboard_general_right']" position="after">
+                <div t-if="record.tax_settlement.raw_value" class="col-12">
+                    <div class="row">
+                        <div class="col-12">
+                            <a role="menuitem" type="object" name="open_action"
+                               class="oe_kanban_action oe_kanban_action_a"
+                               context="{'tax_settlement': True, 'search_default_posted': 1}">
+                                <i class="fa fa-list-ul me-1"></i>
+                                <span>Líneas a liquidar</span>
+                            </a>
+                        </div>
+                    </div>
+                    <div class="row">
+                        <div class="col-12">
+                            <a role="menuitem" type="object" name="open_action"
+                               class="oe_kanban_action oe_kanban_action_a"
+                               context="{'debt_balance': True}">
+                                <i class="fa fa-money me-1"></i>
+                                <span>Saldo a pagar</span>
+                            </a>
+                        </div>
+                    </div>
+                </div>
+            </xpath>
+
+            <!-- Agregar botón "New Payment" después del botón "New" en diarios generales -->
+            <xpath expr="//button[@id='new_misc_entry_button']" position="after">
+                <button type="object" name="action_create_payment"
+                        class="btn btn-secondary float-start"
+                        t-if="record.tax_settlement.raw_value"
+                        groups="account.group_account_user">
+                    <span>New Payment</span>
+                </button>
+            </xpath>
+
+        </field>
+    </record>
+
+    <record id="open_account_tax_settlement_kanban" model="ir.actions.act_window">
+        <field name="name">Tax Settlement</field>
+        <field name="res_model">account.journal</field>
+        <field name="view_mode">kanban,form</field>
+        <field name="view_id" ref="account.account_journal_dashboard_kanban_view"/>
+        <field name="usage">menu</field>
+        <field name="domain">[('tax_settlement', '!=', False)]</field>
+    </record>
+
+    <menuitem id="menu_board_journal_10" name="Tax Settlement" action="open_account_tax_settlement_kanban" parent="account.menu_finance_entries" sequence="20" groups="account.group_account_user"/>
+
+
+</odoo>
